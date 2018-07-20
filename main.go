@@ -17,7 +17,10 @@ type URLSet struct {
 
 // URL is for every single location url
 type URL struct {
-	Loc string `xml:"loc"`
+	Loc        string  `xml:"loc"`
+	LastMod    string  `xml:"lastmod,omitempty"`
+	ChangeFreq string  `xml:"changefreq,omitempty"`
+	Priority   float32 `xml:"priority,omitempty"`
 }
 
 func main() {
@@ -41,9 +44,9 @@ func main() {
 		os.Exit(1)
 	}
 	c := make(chan string)
-	validURLs := []string{}
+	validURLs := []URL{}
 	for _, url := range urlSet.URL {
-		go checkURL(url.Loc, c, &validURLs)
+		go checkURL(url, c, &validURLs)
 	}
 
 	for range urlSet.URL {
@@ -54,10 +57,7 @@ func main() {
 		XMLNs: urlSet.XMLNs,
 	}
 	for _, url := range validURLs {
-		newURL := URL{
-			Loc: url,
-		}
-		newURLSet.URL = append(newURLSet.URL, newURL)
+		newURLSet.URL = append(newURLSet.URL, url)
 	}
 	newRawXML, err := xml.Marshal(newURLSet)
 	if err != nil {
@@ -87,8 +87,8 @@ func readXMLFromResponse(resp *http.Response) []byte {
 	}
 	return rawXMLData
 }
-func checkURL(url string, c chan string, validURLs *[]string) {
-	resp, err := http.Get(url)
+func checkURL(url URL, c chan string, validURLs *[]URL) {
+	resp, err := http.Get(url.Loc)
 	if err != nil {
 		c <- err.Error()
 	}
