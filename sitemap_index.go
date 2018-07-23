@@ -33,14 +33,16 @@ func (s Sitemap) findFileName() string {
 	return filename
 }
 func (si *SitemapIndex) validate() SitemapIndex {
-	c := make(chan string)
+	c := make(chan string, 12)
 	validSitemaps := []Sitemap{}
 
 	for _, sitemap := range (*si).Sitemap {
 		go func(sitemap Sitemap, c chan string) {
 			resp, err := http.Get(sitemap.Loc)
+			defer func() { <-c }()
 			if err != nil {
 				c <- err.Error()
+				return
 			}
 			c <- fmt.Sprintf("Response code is %d for %s", resp.StatusCode, sitemap.Loc)
 			if resp.StatusCode == 200 {

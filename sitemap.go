@@ -37,14 +37,16 @@ func (us *URLSet) saveToFile(filename string) error {
 }
 
 func (us *URLSet) validate() URLSet {
-	c := make(chan string)
+	c := make(chan string, 20)
 
 	validURLs := []URL{}
 	for _, url := range (*us).URL {
 		go func(url URL, c chan string) {
 			resp, err := http.Get(url.Loc)
+			defer func() { <-c }()
 			if err != nil {
 				c <- err.Error()
+				return
 			}
 			c <- fmt.Sprintf("Response code is %d for %s", resp.StatusCode, url.Loc)
 			if resp.StatusCode == 200 {
