@@ -1,7 +1,5 @@
 ## Sitemap Checker
-
-[![Maintainability](https://api.codeclimate.com/v1/badges/04358a82abbbc1f7bb2c/maintainability)](https://codeclimate.com/github/delirehberi/sitemap-checker/maintainability)
-[![Test Coverage](https://api.codeclimate.com/v1/badges/04358a82abbbc1f7bb2c/test_coverage)](https://codeclimate.com/github/delirehberi/sitemap-checker/test_coverage)
+[![Scrutinizer Code Quality](https://scrutinizer-ci.com/g/workouse/sitemap-checker/badges/quality-score.png?b=master)](https://scrutinizer-ci.com/g/workouse/sitemap-checker/?branch=master)
 
 This tool helps you to make sure for url is valid in your sites sitemap file. 
 
