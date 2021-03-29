@@ -3,7 +3,7 @@ package main
 import (
 	"encoding/xml"
 	"fmt"
-	"log"
+    "time"
 	"net/http"
 	"os"
 )
@@ -37,12 +37,15 @@ func (us *URLSet) saveToFile(filename string) error {
 }
 
 func (us *URLSet) validate() URLSet {
+    client := &http.Client{
+        Timeout: 10*time.Second,
+    }
 	c := make(chan string, 20)
 
 	validURLs := []URL{}
 	for _, url := range (*us).URL {
 		go func(url URL, c chan string) {
-			resp, err := http.Get(url.Loc)
+			resp, err := client.Get(url.Loc)
 			defer func() { <-c }()
 			if err != nil {
 				c <- err.Error()
@@ -73,25 +76,32 @@ func newURLSetFromXML(rawXMLData []byte) URLSet {
 	err := xml.Unmarshal(rawXMLData, &us)
 
 	if err != nil {
-		log.Printf("Sitemap cannot parsed. Because: %s", err)
+		fmt.Printf("Sitemap cannot parsed. Because: %s", err)
 		return URLSet{}
 	}
 	return us
 }
 
 func singleProcess(uri string, filename string) {
-	resp, err := http.Get(uri)
+    client := &http.Client{
+        Timeout: 10*time.Second,
+    }
+
+    if Verbose  {fmt.Printf("Single process started for %s\n",filename)}
+	resp, err := client.Get(uri)
 	if err != nil {
-		log.Printf("Url cannot fetched: %s\n", uri)
-		log.Println(err)
+		fmt.Printf("Url cannot fetched: %s\n", uri)
+		fmt.Println(err)
 		os.Exit(1)
 	}
 
 	rawXMLData := readXMLFromResponse(resp)
 
 	urlSet := newURLSetFromXML(rawXMLData)
+    if Verbose {fmt.Printf("URLSet Generated.\n")}
 
 	newURLSet := urlSet.validate()
+    if Verbose {fmt.Printf("URLSet Validated.\n")}
 
 	err = newURLSet.saveToFile(filename)
 
