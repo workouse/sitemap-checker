@@ -23,6 +23,12 @@ type URL struct {
 	Priority   float32 `xml:"priority,omitempty"`
 }
 
+type ValidURL struct{
+    IsValid bool
+    URL URL
+    StatusCode int
+}
+
 func (us *URLSet) saveToFile(filename string) error {
 	m, err := xml.Marshal((*us))
 	if err != nil {
@@ -40,46 +46,50 @@ func (us *URLSet) validate() URLSet {
     client := &http.Client{
         Timeout: 10*time.Second,
     }
-	c := make(chan string, 20)
+    validURLChannel := make(chan ValidURL)
 
-	validURLs := []URL{}
+
 	for _, url := range (*us).URL {
-		go func(url URL, c chan string) {
+		go func(url URL, validURLChannel chan ValidURL) {
 			resp, err := client.Get(url.Loc)
-			defer func() { <-c }()
-			if err != nil {
-				c <- err.Error()
-				return
-			}
-			c <- fmt.Sprintf("Response code is %d for %s", resp.StatusCode, url.Loc)
-			if resp.StatusCode == 200 {
-				validURLs = append(validURLs, url)
-			}
-		}(url, c)
+            statusCode := (*resp).StatusCode
+            validURL := ValidURL {
+                IsValid: err == nil && statusCode == 200,
+                URL: url,
+                StatusCode: statusCode,
+            }
+            validURLChannel <- validURL
+		}(url, validURLChannel)
 	}
 
-	for range us.URL {
-		fmt.Println(<-c)
-	}
 	newURLSet := URLSet{
 		XMLNs: us.XMLNs,
 	}
-	for _, url := range validURLs {
-		newURLSet.URL = append(newURLSet.URL, url)
+
+	for range us.URL {
+        validURL:= <-validURLChannel
+        if validURL.IsValid {
+		    newURLSet.URL = append(newURLSet.URL, validURL.URL)
+        }else{
+            fmt.Printf("Url is dead (%s): %s \n",validURL.StatusCode,validURL.URL.Loc)
+        }
 	}
+        close(validURLChannel)
+
 	return newURLSet
 }
-
-func newURLSetFromXML(rawXMLData []byte) URLSet {
+//i will use first parameter to determine sitemapIndex or not.
+func newURLSetFromXML(rawXMLData []byte) (bool,URLSet) {
 	us := URLSet{}
 
 	err := xml.Unmarshal(rawXMLData, &us)
 
-	if err != nil {
-		fmt.Printf("Sitemap cannot parsed. Because: %s", err)
-		return URLSet{}
+	if err != nil { //some kind of goto
+        sitemapIndex := newSitemapIndexFromXML(rawXMLData)
+        sitemapIndexValidate(sitemapIndex)
+        return true, URLSet{}
 	}
-	return us
+	return false,us
 }
 
 func singleProcess(uri string, filename string) {
@@ -87,26 +97,25 @@ func singleProcess(uri string, filename string) {
         Timeout: 10*time.Second,
     }
 
-    if Verbose  {fmt.Printf("Single process started for %s\n",filename)}
-	resp, err := client.Get(uri)
-	if err != nil {
-		fmt.Printf("Url cannot fetched: %s\n", uri)
-		fmt.Println(err)
-		os.Exit(1)
-	}
+    resp, err := client.Get(uri)
+    if err != nil {
+        fmt.Printf("Url cannot fetched: %s\n", uri)
+        fmt.Println(err)
+        os.Exit(1)
+    }
 
-	rawXMLData := readXMLFromResponse(resp)
+    rawXMLData := readXMLFromResponse(resp)
 
-	urlSet := newURLSetFromXML(rawXMLData)
-    if Verbose {fmt.Printf("URLSet Generated.\n")}
+    isJumped, urlSet := newURLSetFromXML(rawXMLData)
+    if !isJumped { 
 
-	newURLSet := urlSet.validate()
-    if Verbose {fmt.Printf("URLSet Validated.\n")}
+        newURLSet := urlSet.validate()
 
-	err = newURLSet.saveToFile(filename)
+        err = newURLSet.saveToFile(filename)
 
-	if err != nil {
-		fmt.Println(err)
-		os.Exit(1)
-	}
+        if err != nil {
+            fmt.Println(err)
+            os.Exit(1)
+        }
+    }
 }
