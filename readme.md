@@ -1,5 +1,6 @@
 ## Sitemap Checker
 [![Scrutinizer Code Quality](https://scrutinizer-ci.com/g/workouse/sitemap-checker/badges/quality-score.png?b=master)](https://scrutinizer-ci.com/g/workouse/sitemap-checker/?branch=master)
+[![Go](https://github.com/workouse/sitemap-checker/actions/workflows/go.yml/badge.svg)](https://github.com/workouse/sitemap-checker/actions/workflows/go.yml)
 
 ![image](https://user-images.githubusercontent.com/803964/211917944-757cba14-5335-4989-923c-da3476c5cfbb.png)
 
