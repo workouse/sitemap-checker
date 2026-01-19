@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"sync"
 	"time"
 )
 
@@ -43,35 +44,57 @@ func (us *URLSet) saveToFile(filename string) error {
 }
 
 func (us *URLSet) validate() URLSet {
+	// Create an HTTP client with a timeout
 	client := &http.Client{
 		Timeout: 10 * time.Second,
 	}
 
+	// Initialize the new URLSet
 	newURLSet := URLSet{
 		XMLNs: us.XMLNs,
 	}
 
-	n := len((*us).URL)
-	for i, url := range (*us).URL {
-		// time.Sleep(5 * time.Second)
-		resp, err := client.Get(url.Loc)
-		if err == nil {
-			statusCode := (*resp).StatusCode
-			if statusCode == 200 {
-				fmt.Printf("Url %d/%d check (%d): %s \n", i, n, statusCode, url.Loc)
-				newURLSet.URL = append(newURLSet.URL, url)
-			} else {
-				fmt.Printf("Url %d/%d dead (%d): %s \n", i, n, statusCode, url.Loc)
+	// Create a semaphore to limit the number of concurrent requests
+	maxConcurrentRequests := 10
+	sem := make(chan struct{}, maxConcurrentRequests)
+
+	// Use a WaitGroup to wait for all goroutines
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+
+	n := len(us.URL)
+	for i, url := range us.URL {
+		wg.Add(1)
+		sem <- struct{}{} // Acquire a semaphore slot
+
+		go func(i int, url URL) {
+			defer wg.Done()
+			defer func() { <-sem }() // Release the semaphore slot
+
+			resp, err := client.Get(url.Loc)
+			if err != nil {
+				fmt.Printf("Url %d/%d error: %s\n", i, n, url.Loc)
+				return
 			}
-		} else {
-			fmt.Printf("Url %d/%d error: %s \n", i, n, url.Loc)
-		}
+			defer resp.Body.Close()
+
+			if resp.StatusCode == 200 {
+				fmt.Printf("Url %d/%d check (200): %s\n", i, n, url.Loc)
+				mu.Lock()
+				newURLSet.URL = append(newURLSet.URL, url)
+				mu.Unlock()
+			} else {
+				fmt.Printf("Url %d/%d dead (%d): %s\n", i, n, resp.StatusCode, url.Loc)
+			}
+		}(i, url)
 	}
+
+	wg.Wait() // Wait for all requests to complete
 
 	return newURLSet
 }
 
-//i will use first parameter to determine sitemapIndex or not.
+// i will use first parameter to determine sitemapIndex or not.
 func newURLSetFromXML(rawXMLData []byte) (bool, URLSet) {
 	us := URLSet{}
 
