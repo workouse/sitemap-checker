@@ -20,8 +20,8 @@ type Sitemap struct {
 	LastMod string `xml:"lastmod,omitempty"`
 }
 type SitemapValidation struct {
-    IsValid bool
-    Sitemap Sitemap
+	IsValid bool
+	Sitemap Sitemap
 }
 
 func (s Sitemap) findFileName() string {
@@ -29,11 +29,11 @@ func (s Sitemap) findFileName() string {
 
 	dir := path.Dir(u.Path)
 
-    if dir=="/" {
-        dir="."
-    }
+	if dir == "/" {
+		dir = "."
+	}
 
-    filename := u.Path[len(dir):]
+	filename := u.Path[len(dir):]
 
 	if _, err := os.Stat(dir); os.IsNotExist(err) != false {
 		os.MkdirAll(dir, 0777)
@@ -44,49 +44,49 @@ func (s Sitemap) findFileName() string {
 func (si *SitemapIndex) validate() SitemapIndex {
 	validatedSitemapChannel := make(chan SitemapValidation)
 
-    for _, sitemap := range (*si).Sitemap {
-        go func(s Sitemap){
-            s.validate(validatedSitemapChannel)
-        }(sitemap)
-    }
+	for _, sitemap := range (*si).Sitemap {
+		go func(s Sitemap) {
+			s.validate(validatedSitemapChannel)
+		}(sitemap)
+	}
 
 	newSitemapIndex := SitemapIndex{
 		XMLNs: si.XMLNs,
 	}
 
-    for i:=0;i<len((*si).Sitemap);i++ {
-        validatedSitemap := <-validatedSitemapChannel
-        if validatedSitemap.IsValid {
-            newSitemapIndex.Sitemap = append(newSitemapIndex.Sitemap, validatedSitemap.Sitemap)
-        }else{
-            fmt.Printf("Url is dead: %s\n",validatedSitemap.Sitemap.Loc)
-        }
+	for i := 0; i < len((*si).Sitemap); i++ {
+		validatedSitemap := <-validatedSitemapChannel
+		if validatedSitemap.IsValid {
+			newSitemapIndex.Sitemap = append(newSitemapIndex.Sitemap, validatedSitemap.Sitemap)
+		} else {
+			fmt.Printf("Url is dead: %s\n", validatedSitemap.Sitemap.Loc)
+		}
 	}
 
-    close(validatedSitemapChannel)
+	close(validatedSitemapChannel)
 
 	return newSitemapIndex
 }
 
 func (s *Sitemap) validate(sitemapChannel chan SitemapValidation) {
 
-    resp,err := http.Get((*s).Loc)
-    if err!=nil {
-        fmt.Println(err.Error)
-        return
-    }
+	resp, err := http.Get((*s).Loc)
+	if err != nil {
+		fmt.Println(err.Error)
+		return
+	}
 
-    validateSitemap := SitemapValidation {
-        Sitemap: (*s),
-        IsValid: true,
-    }
+	validateSitemap := SitemapValidation{
+		Sitemap: (*s),
+		IsValid: true,
+	}
 
-    if resp.StatusCode != 200 {
-        validateSitemap.IsValid = false;
-    }
-    sitemapChannel <- validateSitemap
+	if resp.StatusCode != 200 {
+		validateSitemap.IsValid = false
+	}
+	sitemapChannel <- validateSitemap
 
-    return
+	return
 }
 
 func (si *SitemapIndex) saveToFile(filename string) error {
@@ -113,7 +113,7 @@ func batchProcess(uri string) {
 	rawXMLData := readXMLFromResponse(resp)
 
 	sitemapIndex := newSitemapIndexFromXML(rawXMLData)
-    sitemapIndexValidate(sitemapIndex)
+	sitemapIndexValidate(sitemapIndex)
 }
 
 func sitemapIndexValidate(sitemapIndex SitemapIndex) {
@@ -121,7 +121,9 @@ func sitemapIndexValidate(sitemapIndex SitemapIndex) {
 
 	for _, sitemap := range newSitemapIndex.Sitemap {
 		filename := sitemap.findFileName()
-        if Verbose {fmt.Printf("Filename is %s\n",filename)}
+		if Verbose {
+			fmt.Printf("Filename is %s\n", filename)
+		}
 		singleProcess(sitemap.Loc, filename)
 		time.Sleep(time.Second * 2)
 	}

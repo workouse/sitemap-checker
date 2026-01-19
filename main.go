@@ -11,33 +11,33 @@ var (
 	URI            string
 	IsIndex        bool
 	OutputFileName string
-    Verbose        bool
+	Verbose        bool
 )
 
 func init() {
 	flag.StringVar(&URI, "uri", "", "Sitemap uri full path")
 	flag.BoolVar(&IsIndex, "index", false, "Is this uri sitemap index file?")
 	flag.StringVar(&OutputFileName, "out", "sitemap.xml", "Output file name for valid sitemap file")
-    flag.BoolVar(&Verbose,"verbose",false,"Verbose mode")
+	flag.BoolVar(&Verbose, "verbose", false, "Verbose mode")
 }
 func main() {
-    flag.Parse()
-    if (URI == "" && OutputFileName == "" && IsIndex == false) || (URI == "" && IsIndex == false) {
-        help()
-    }
-    if(Verbose){
-        fmt.Println(IsIndex)
-    }
-    if IsIndex {
-        if(Verbose){
-            fmt.Println("Batch process started for index file")
-        }
-        batchProcess(URI)
-    } else {
-        singleProcess(URI, OutputFileName)
-    }
+	flag.Parse()
+	if (URI == "" && OutputFileName == "" && IsIndex == false) || (URI == "" && IsIndex == false) {
+		help()
+	}
+	if Verbose {
+		fmt.Println(IsIndex)
+	}
+	if IsIndex {
+		if Verbose {
+			fmt.Println("Batch process started for index file")
+		}
+		batchProcess(URI)
+	} else {
+		singleProcess(URI, OutputFileName)
+	}
 
-    fmt.Println("Completed")
+	fmt.Println("Completed")
 }
 
 func readXMLFromResponse(resp *http.Response) []byte {
