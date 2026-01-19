@@ -1,0 +1,95 @@
+name: Build and Release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.13'
+
+      - name: Get version from tag
+        id: get_version
+        run: echo "VERSION=${GITHUB_REF##*/}" >> $GITHUB_ENV
+
+      - name: Build for Linux (amd64)
+        run: |
+          GOOS=linux GOARCH=amd64 go build -o build/linux/sitemap-checker
+          tar -czvf build/sitemap-checker_${{ env.VERSION }}_linux_amd64.tar.gz -C build/linux .
+
+      - name: Build for macOS (amd64)
+        run: |
+          GOOS=darwin GOARCH=amd64 go build -o build/darwin/sitemap-checker
+          zip -j build/sitemap-checker_${{ env.VERSION }}_darwin_amd64.zip build/darwin/sitemap-checker
+
+      - name: Build for Windows (amd64)
+        run: |
+          GOOS=windows GOARCH=amd64 go build -o build/windows/sitemap-checker.exe
+          zip -j build/sitemap-checker_${{ env.VERSION }}_windows_amd64.zip build/windows/sitemap-checker.exe
+
+      - name: Create Debian Package
+        run: |
+          mkdir -p debian/usr/local/bin
+          cp build/linux/sitemap-checker debian/usr/local/bin/
+          mkdir -p debian/DEBIAN
+          cat <<EOF > debian/DEBIAN/control
+          Package: sitemap-checker
+          Version: ${{ env.VERSION }}
+          Section: base
+          Priority: optional
+          Architecture: amd64
+          Maintainer: Emre Yilmaz <z@emre.xyz>
+          Description: A tool to check sitemap URLs.
+          EOF
+          dpkg-deb --build debian
+          mv debian.deb build/sitemap-checker_${{ env.VERSION }}_amd64.deb
+
+      - name: Create Release
+        id: create_release
+        uses: actions/create-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: ${{ github.ref }}
+          release_name: Release ${{ github.ref }}
+          draft: false
+          prerelease: false
+
+      - name: Upload Linux Debian Release Asset
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ steps.create_release.outputs.upload_url }}
+          asset_path: ./build/sitemap-checker_${{ env.VERSION }}_amd64.deb
+          asset_name: sitemap-checker_${{ env.VERSION }}_amd64.deb
+          asset_content_type: application/vnd.debian.binary-package
+
+      - name: Upload macOS Release Asset
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ steps.create_release.outputs.upload_url }}
+          asset_path: ./build/sitemap-checker_${{ env.VERSION }}_darwin_amd64.zip
+          asset_name: sitemap-checker_${{ env.VERSION }}_darwin_amd64.zip
+          asset_content_type: application/zip
+
+      - name: Upload Windows Release Asset
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ steps.create_release.outputs.upload_url }}
+          asset_path: ./build/sitemap-checker_${{ env.VERSION }}_windows_amd64.zip
+          asset_name: sitemap-checker_${{ env.VERSION }}_windows_amd64.zip
+          asset_content_type: application/zip
