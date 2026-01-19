@@ -19,7 +19,10 @@ jobs:
 
       - name: Get version from tag
         id: get_version
-        run: echo "VERSION=${GITHUB_REF##*/}" >> $GITHUB_ENV
+        run: |
+          VERSION=${GITHUB_REF##*/}
+          echo "VERSION=$VERSION" >> $GITHUB_ENV
+          echo "DEB_VERSION=${VERSION#v}" >> $GITHUB_ENV
 
       - name: Build for Linux (amd64)
         run: |
@@ -43,7 +46,7 @@ jobs:
           mkdir -p debian/DEBIAN
           cat <<EOF > debian/DEBIAN/control
           Package: sitemap-checker
-          Version: ${{ env.VERSION }}
+          Version: ${{ env.DEB_VERSION }}
           Section: base
           Priority: optional
           Architecture: amd64
