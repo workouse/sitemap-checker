@@ -126,55 +126,58 @@ func (si *SitemapIndex) saveToFile(filename string) error {
 	return err
 }
 
-func batchProcess(uri string) {
-	resp, err := http.Get(uri)
+func batchProcess(uri string) error {
+	rawXMLData, err := fetchXML(uri)
 	if err != nil {
-		fmt.Printf("Url cannot fetched: %s\n", uri)
-		fmt.Println(err)
-		os.Exit(1)
+		return err
 	}
 
-	rawXMLData := readXMLFromResponse(resp)
-
-	sitemapIndex := newSitemapIndexFromXML(rawXMLData)
-	sitemapIndexValidate(sitemapIndex)
+	sitemapIndex, err := newSitemapIndexFromXML(rawXMLData)
+	if err != nil {
+		return fmt.Errorf("%s is not a sitemap index: %v", uri, err)
+	}
+	return sitemapIndexValidate(sitemapIndex)
 }
 
-func sitemapIndexValidate(sitemapIndex SitemapIndex) {
+func sitemapIndexValidate(sitemapIndex SitemapIndex) error {
 	newSitemapIndex := sitemapIndex.validate()
+	processed := SitemapIndex{XMLNs: newSitemapIndex.XMLNs}
 
 	for _, sitemap := range newSitemapIndex.Sitemap {
 		filename, err := sitemap.findFileName()
 		if err != nil {
 			fmt.Printf("Skipping %s: %s\n", sitemap.Loc, err)
+			processed.Sitemap = append(processed.Sitemap, sitemap)
 			continue
 		}
 		if filepath.Clean(filename) == filepath.Clean(OutputFileName) {
 			fmt.Printf("Skipping %s: it would overwrite the output file %s\n", sitemap.Loc, OutputFileName)
+			processed.Sitemap = append(processed.Sitemap, sitemap)
 			continue
 		}
 		if err := os.MkdirAll(filepath.Dir(filename), 0755); err != nil {
 			fmt.Printf("Skipping %s: %s\n", sitemap.Loc, err)
+			processed.Sitemap = append(processed.Sitemap, sitemap)
 			continue
 		}
 		if Verbose {
 			fmt.Printf("Filename is %s\n", filename)
 		}
-		singleProcess(sitemap.Loc, filename)
+		if err := singleProcess(sitemap.Loc, filename); err != nil {
+			fmt.Printf("Dropping %s: %s\n", sitemap.Loc, err)
+		} else {
+			processed.Sitemap = append(processed.Sitemap, sitemap)
+		}
 		time.Sleep(time.Second * 2)
 	}
 
-	newSitemapIndex.saveToFile(OutputFileName)
-
+	return processed.saveToFile(OutputFileName)
 }
 
-func newSitemapIndexFromXML(rawXMLData []byte) SitemapIndex {
+func newSitemapIndexFromXML(rawXMLData []byte) (SitemapIndex, error) {
 	sm := SitemapIndex{}
-	err := xml.Unmarshal(rawXMLData, &sm)
-
-	if err != nil {
-		fmt.Printf("Sitemap index cannot parsed. Because: %s", err)
-		return SitemapIndex{}
+	if err := xml.Unmarshal(rawXMLData, &sm); err != nil {
+		return SitemapIndex{}, err
 	}
-	return sm
+	return sm, nil
 }

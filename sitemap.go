@@ -43,6 +43,29 @@ func (us *URLSet) saveToFile(filename string) error {
 	return err
 }
 
+var retryDelay = 500 * time.Millisecond
+
+// retryable reports whether a check result may change on a later attempt.
+func retryable(status int, err error) bool {
+	return err != nil || status == http.StatusTooManyRequests || status >= 500
+}
+
+// checkURL requests loc, retrying with exponential backoff while the result is retryable.
+func checkURL(client *http.Client, loc string) (int, error) {
+	for attempt := 0; ; attempt++ {
+		status := 0
+		resp, err := client.Get(loc)
+		if err == nil {
+			status = resp.StatusCode
+			resp.Body.Close()
+		}
+		if !retryable(status, err) || attempt >= Retries {
+			return status, err
+		}
+		time.Sleep(retryDelay << uint(attempt))
+	}
+}
+
 func (us *URLSet) validate() URLSet {
 	// Create an HTTP client with a timeout
 	client := &http.Client{
@@ -60,7 +83,9 @@ func (us *URLSet) validate() URLSet {
 
 	// Use a WaitGroup to wait for all goroutines
 	var wg sync.WaitGroup
-	var mu sync.Mutex
+
+	// Results are written by index so the output keeps the input order.
+	keep := make([]bool, len(us.URL))
 
 	n := len(us.URL)
 	for i, url := range us.URL {
@@ -71,67 +96,67 @@ func (us *URLSet) validate() URLSet {
 			defer wg.Done()
 			defer func() { <-sem }() // Release the semaphore slot
 
-			resp, err := client.Get(url.Loc)
-			if err != nil {
-				fmt.Printf("Url %d/%d error: %s\n", i, n, url.Loc)
-				return
-			}
-			defer resp.Body.Close()
-
-			if resp.StatusCode == 200 {
+			status, err := checkURL(client, url.Loc)
+			switch {
+			case err == nil && status == http.StatusOK:
 				fmt.Printf("Url %d/%d check (200): %s\n", i, n, url.Loc)
-				mu.Lock()
-				newURLSet.URL = append(newURLSet.URL, url)
-				mu.Unlock()
-			} else {
-				fmt.Printf("Url %d/%d dead (%d): %s\n", i, n, resp.StatusCode, url.Loc)
+				keep[i] = true
+			case retryable(status, err):
+				cause := fmt.Sprintf("status %d", status)
+				if err != nil {
+					cause = err.Error()
+				}
+				if KeepUnverified {
+					fmt.Printf("Url %d/%d unverified, kept (%s): %s\n", i, n, cause, url.Loc)
+					keep[i] = true
+				} else {
+					fmt.Printf("Url %d/%d unverified, dropped (%s): %s\n", i, n, cause, url.Loc)
+				}
+			default:
+				fmt.Printf("Url %d/%d dead (%d): %s\n", i, n, status, url.Loc)
 			}
 		}(i, url)
 	}
 
 	wg.Wait() // Wait for all requests to complete
 
+	for i, url := range us.URL {
+		if keep[i] {
+			newURLSet.URL = append(newURLSet.URL, url)
+		}
+	}
+
 	return newURLSet
 }
 
-// i will use first parameter to determine sitemapIndex or not.
-func newURLSetFromXML(rawXMLData []byte) (bool, URLSet) {
-	us := URLSet{}
-
-	err := xml.Unmarshal(rawXMLData, &us)
-
-	if err != nil { //some kind of goto
-		sitemapIndex := newSitemapIndexFromXML(rawXMLData)
-		sitemapIndexValidate(sitemapIndex)
-		return true, URLSet{}
-	}
-	return false, us
-}
-
-func singleProcess(uri string, filename string) {
-	client := &http.Client{
-		Timeout: 100 * time.Second,
-	}
-
-	resp, err := client.Get(uri)
+// singleProcess validates the sitemap at uri and writes the live urls to filename.
+// A sitemap index is handed over to sitemapIndexValidate.
+func singleProcess(uri string, filename string) error {
+	rawXMLData, err := fetchXML(uri)
 	if err != nil {
-		fmt.Printf("Url cannot fetched: %s\n", uri)
-		fmt.Println(err)
-		os.Exit(1)
+		return err
 	}
 
-	rawXMLData := readXMLFromResponse(resp)
+	root, err := rootElement(rawXMLData)
+	if err != nil {
+		return fmt.Errorf("%s is not a sitemap: %v", uri, err)
+	}
 
-	isJumped, urlSet := newURLSetFromXML(rawXMLData)
-	if !isJumped {
-
-		newURLSet := urlSet.validate()
-
-		err = newURLSet.saveToFile(filename)
-
-		if err != nil {
-			fmt.Println(err)
-			os.Exit(1)
+	switch root {
+	case "urlset":
+		us := URLSet{}
+		if err := xml.Unmarshal(rawXMLData, &us); err != nil {
+			return fmt.Errorf("%s cannot be parsed: %v", uri, err)
 		}
+		newURLSet := us.validate()
+		return newURLSet.saveToFile(filename)
+	case "sitemapindex":
+		sitemapIndex, err := newSitemapIndexFromXML(rawXMLData)
+		if err != nil {
+			return fmt.Errorf("%s cannot be parsed: %v", uri, err)
+		}
+		return sitemapIndexValidate(sitemapIndex)
+	default:
+		return fmt.Errorf("%s is not a sitemap: unexpected root element <%s>", uri, root)
 	}
 }
