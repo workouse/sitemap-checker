@@ -7,6 +7,9 @@ import (
 	"net/url"
 	"os"
 	"path"
+	"path/filepath"
+	"strings"
+	"sync"
 	"time"
 )
 
@@ -22,71 +25,92 @@ type Sitemap struct {
 type SitemapValidation struct {
 	IsValid bool
 	Sitemap Sitemap
+	Err     error
 }
 
-func (s Sitemap) findFileName() string {
-	u, _ := url.Parse(s.Loc)
-
-	dir := path.Dir(u.Path)
-
-	if dir == "/" {
-		dir = "."
+// findFileName maps the sitemap url path to a file path relative to the
+// working directory. The url comes from a remote document, so the result must
+// never be absolute or escape the working directory.
+func (s Sitemap) findFileName() (string, error) {
+	u, err := url.Parse(s.Loc)
+	if err != nil {
+		return "", fmt.Errorf("cannot parse sitemap url %q: %w", s.Loc, err)
 	}
 
-	filename := u.Path[len(dir):]
-
-	if _, err := os.Stat(dir); os.IsNotExist(err) != false {
-		os.MkdirAll(dir, 0777)
+	// Cleaning the rooted path drops any ".." elements that would climb above it.
+	name := path.Clean("/" + u.Path)
+	if name == "/" {
+		return "", fmt.Errorf("sitemap url %q has no file name", s.Loc)
 	}
-	filename = dir + string(os.PathSeparator) + filename
-	return filename
+	if strings.Contains(name, `\`) {
+		return "", fmt.Errorf("sitemap url %q has an unsupported path", s.Loc)
+	}
+
+	filename := filepath.FromSlash(name[1:])
+	if filepath.IsAbs(filename) || filepath.VolumeName(filename) != "" {
+		return "", fmt.Errorf("sitemap url %q has an unsupported path", s.Loc)
+	}
+	return filename, nil
 }
+
 func (si *SitemapIndex) validate() SitemapIndex {
-	validatedSitemapChannel := make(chan SitemapValidation)
-
-	for _, sitemap := range (*si).Sitemap {
-		go func(s Sitemap) {
-			s.validate(validatedSitemapChannel)
-		}(sitemap)
+	client := &http.Client{
+		Timeout: 10 * time.Second,
 	}
+
+	results := make([]SitemapValidation, len(si.Sitemap))
+
+	// Limit the number of concurrent requests
+	maxConcurrentRequests := 10
+	sem := make(chan struct{}, maxConcurrentRequests)
+
+	var wg sync.WaitGroup
+	for i := range si.Sitemap {
+		wg.Add(1)
+		sem <- struct{}{} // Acquire a semaphore slot
+
+		go func(i int) {
+			defer wg.Done()
+			defer func() { <-sem }() // Release the semaphore slot
+
+			results[i] = si.Sitemap[i].validate(client)
+		}(i)
+	}
+	wg.Wait()
 
 	newSitemapIndex := SitemapIndex{
 		XMLNs: si.XMLNs,
 	}
 
-	for i := 0; i < len((*si).Sitemap); i++ {
-		validatedSitemap := <-validatedSitemapChannel
-		if validatedSitemap.IsValid {
-			newSitemapIndex.Sitemap = append(newSitemapIndex.Sitemap, validatedSitemap.Sitemap)
+	for _, r := range results {
+		if r.IsValid {
+			newSitemapIndex.Sitemap = append(newSitemapIndex.Sitemap, r.Sitemap)
 		} else {
-			fmt.Printf("Url is dead: %s\n", validatedSitemap.Sitemap.Loc)
+			fmt.Printf("Url is dead: %s (%v)\n", r.Sitemap.Loc, r.Err)
 		}
 	}
-
-	close(validatedSitemapChannel)
 
 	return newSitemapIndex
 }
 
-func (s *Sitemap) validate(sitemapChannel chan SitemapValidation) {
+// validate always returns a result, so a failed request cannot stall the caller.
+func (s *Sitemap) validate(client *http.Client) SitemapValidation {
+	result := SitemapValidation{Sitemap: *s}
 
-	resp, err := http.Get((*s).Loc)
+	resp, err := client.Get(s.Loc)
 	if err != nil {
-		fmt.Println(err.Error)
-		return
+		result.Err = err
+		return result
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		result.Err = fmt.Errorf("status %d", resp.StatusCode)
+		return result
 	}
 
-	validateSitemap := SitemapValidation{
-		Sitemap: (*s),
-		IsValid: true,
-	}
-
-	if resp.StatusCode != 200 {
-		validateSitemap.IsValid = false
-	}
-	sitemapChannel <- validateSitemap
-
-	return
+	result.IsValid = true
+	return result
 }
 
 func (si *SitemapIndex) saveToFile(filename string) error {
@@ -120,7 +144,19 @@ func sitemapIndexValidate(sitemapIndex SitemapIndex) {
 	newSitemapIndex := sitemapIndex.validate()
 
 	for _, sitemap := range newSitemapIndex.Sitemap {
-		filename := sitemap.findFileName()
+		filename, err := sitemap.findFileName()
+		if err != nil {
+			fmt.Printf("Skipping %s: %s\n", sitemap.Loc, err)
+			continue
+		}
+		if filepath.Clean(filename) == filepath.Clean(OutputFileName) {
+			fmt.Printf("Skipping %s: it would overwrite the output file %s\n", sitemap.Loc, OutputFileName)
+			continue
+		}
+		if err := os.MkdirAll(filepath.Dir(filename), 0755); err != nil {
+			fmt.Printf("Skipping %s: %s\n", sitemap.Loc, err)
+			continue
+		}
 		if Verbose {
 			fmt.Printf("Filename is %s\n", filename)
 		}
