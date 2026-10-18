@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -67,7 +68,7 @@ func TestSingleProcess(t *testing.T) {
 
 	t.Run("urlset keeps live urls in order without padding", func(t *testing.T) {
 		out := filepath.Join(dir, "ok.xml")
-		if err := singleProcess(live.URL+"/sitemap.xml", out); err != nil {
+		if _, err := singleProcess(live.URL+"/sitemap.xml", out); err != nil {
 			t.Fatal(err)
 		}
 		data, err := ioutil.ReadFile(out)
@@ -86,7 +87,7 @@ func TestSingleProcess(t *testing.T) {
 	for _, path := range []string{"/page.html", "/missing.xml"} {
 		t.Run("no output for "+path, func(t *testing.T) {
 			out := filepath.Join(dir, "bad"+strings.Replace(path, "/", "_", -1))
-			if err := singleProcess(live.URL+path, out); err == nil {
+			if _, err := singleProcess(live.URL+path, out); err == nil {
 				t.Fatal("singleProcess() succeeded, want an error")
 			}
 			if _, err := os.Stat(out); !os.IsNotExist(err) {
@@ -111,7 +112,7 @@ func TestBatchProcessRejectsNonIndex(t *testing.T) {
 	OutputFileName = filepath.Join(dir, "out.xml")
 	defer func() { OutputFileName = oldOut }()
 
-	if err := batchProcess(srv.URL); err == nil {
+	if _, err := batchProcess(srv.URL); err == nil {
 		t.Fatal("batchProcess() succeeded for a urlset, want an error")
 	}
 	if _, err := os.Stat(OutputFileName); !os.IsNotExist(err) {
@@ -143,7 +144,7 @@ func TestURLSetValidateRetries(t *testing.T) {
 	for _, p := range []string{"/flaky", "/down", "/limited", "/gone"} {
 		urls.URL = append(urls.URL, URL{Loc: srv.URL + p})
 	}
-	locs := func(us URLSet) string {
+	locs := func(us URLSet, stats Stats) string {
 		var paths []string
 		for _, u := range us.URL {
 			paths = append(paths, strings.TrimPrefix(u.Loc, srv.URL))
@@ -152,19 +153,144 @@ func TestURLSetValidateRetries(t *testing.T) {
 	}
 
 	restore := withSettings(2, false)
-	if got := locs(urls.validate()); got != "/flaky" {
+	got, stats := urls.validate()
+	if got := locs(got, stats); got != "/flaky" {
 		t.Errorf("validate() kept %q, want /flaky", got)
 	}
-	if downHits != 3 {
-		t.Errorf("/down requested %d times, want 3", downHits)
+	if want := (Stats{Checked: 4, Alive: 1, Dead: 1, Unverified: 2, Dropped: 3}); stats != want {
+		t.Errorf("validate() stats = %+v, want %+v", stats, want)
 	}
-	if goneHits != 1 {
-		t.Errorf("/gone requested %d times, want 1 (404 is not retried)", goneHits)
+	// Every probe is a HEAD followed by a confirming GET.
+	if downHits != 6 {
+		t.Errorf("/down requested %d times, want 6 (3 attempts)", downHits)
+	}
+	if goneHits != 2 {
+		t.Errorf("/gone requested %d times, want 2 (1 attempt, 404 is not retried)", goneHits)
 	}
 
 	restore()
 	defer withSettings(0, true)()
-	if got := locs(urls.validate()); got != "/flaky,/down,/limited" {
+	got, stats = urls.validate()
+	if got := locs(got, stats); got != "/flaky,/down,/limited" {
 		t.Errorf("validate() with keep-unverified kept %q, want /flaky,/down,/limited", got)
+	}
+	if stats.Dropped != 1 {
+		t.Errorf("validate() with keep-unverified dropped %d, want 1", stats.Dropped)
+	}
+}
+
+const extendedSitemap = `<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9" xmlns:image="http://www.google.com/schemas/sitemap-image/1.1" xmlns:xhtml="http://www.w3.org/1999/xhtml">
+  <url>
+    <loc>%[1]s/keep</loc>
+    <priority>0.0</priority>
+    <image:image><image:loc>%[1]s/img.png</image:loc></image:image>
+    <xhtml:link rel="alternate" hreflang="tr" href="%[1]s/tr"/>
+  </url>
+  <url>
+    <loc>%[1]s/gone</loc>
+    <image:image><image:loc>%[1]s/gone.png</image:loc></image:image>
+  </url>
+</urlset>`
+
+func TestSingleProcessPreservesExtensions(t *testing.T) {
+	var mu sync.Mutex
+	var methods []string
+	var srv *httptest.Server
+	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/sitemap.xml" {
+			fmt.Fprintf(w, extendedSitemap, srv.URL)
+			return
+		}
+		if r.Header.Get("User-Agent") == "" || strings.HasPrefix(r.Header.Get("User-Agent"), "Go-http-client") {
+			t.Errorf("request to %s has User-Agent %q", r.URL.Path, r.Header.Get("User-Agent"))
+		}
+		mu.Lock()
+		methods = append(methods, r.Method+" "+r.URL.Path)
+		mu.Unlock()
+		switch {
+		case r.URL.Path == "/keep" && r.Method == http.MethodHead:
+			w.WriteHeader(http.StatusMethodNotAllowed) // forces the GET fallback
+		case r.URL.Path == "/keep":
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+	defer withSettings(0, false)()
+
+	dir, err := ioutil.TempDir("", "sitemap")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(dir)
+	out := filepath.Join(dir, "out.xml")
+
+	if _, err := singleProcess(srv.URL+"/sitemap.xml", out); err != nil {
+		t.Fatal(err)
+	}
+	data, err := ioutil.ReadFile(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(data)
+	for _, want := range []string{
+		`xmlns:image="http://www.google.com/schemas/sitemap-image/1.1"`,
+		`<priority>0.0</priority>`,
+		`<image:loc>` + srv.URL + `/img.png</image:loc>`,
+		`<xhtml:link rel="alternate" hreflang="tr" href="` + srv.URL + `/tr"/>`,
+		"</urlset>",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("output lacks %q:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, "/gone") {
+		t.Errorf("output still has the dead url:\n%s", got)
+	}
+	if _, err := parseURLSet(data); err != nil {
+		t.Errorf("output does not parse again: %v", err)
+	}
+
+	joined := strings.Join(methods, ",")
+	if !strings.Contains(joined, "HEAD /keep") || !strings.Contains(joined, "GET /keep") {
+		t.Errorf("requests = %v, want a HEAD and a GET for /keep", methods)
+	}
+	if info, err := os.Stat(out); err != nil || info.Mode().Perm() != 0644 && os.PathSeparator == '/' {
+		t.Errorf("output stat = %v, %v; want mode 0644", info, err)
+	}
+	if left, _ := filepath.Glob(filepath.Join(dir, ".sitemap-*")); len(left) != 0 {
+		t.Errorf("temporary files left behind: %v", left)
+	}
+}
+
+func TestSingleProcessNoLiveURLs(t *testing.T) {
+	var srv *httptest.Server
+	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/sitemap.xml" {
+			fmt.Fprintf(w, `<urlset xmlns="ns"><url><loc>%s/gone</loc></url></urlset>`, srv.URL)
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer srv.Close()
+	defer withSettings(0, false)()
+
+	dir, err := ioutil.TempDir("", "sitemap")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(dir)
+	out := filepath.Join(dir, "out.xml")
+
+	stats, err := singleProcess(srv.URL+"/sitemap.xml", out)
+	if err == nil {
+		t.Fatal("singleProcess() succeeded without live urls, want an error")
+	}
+	if stats.Dead != 1 || stats.Dropped != 1 {
+		t.Errorf("stats = %+v, want 1 dead and 1 dropped", stats)
+	}
+	if _, err := os.Stat(out); !os.IsNotExist(err) {
+		t.Errorf("output file was written: %v", err)
 	}
 }

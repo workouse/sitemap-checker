@@ -54,10 +54,6 @@ func (s Sitemap) findFileName() (string, error) {
 }
 
 func (si *SitemapIndex) validate() SitemapIndex {
-	client := &http.Client{
-		Timeout: 10 * time.Second,
-	}
-
 	results := make([]SitemapValidation, len(si.Sitemap))
 
 	// Limit the number of concurrent requests
@@ -73,7 +69,7 @@ func (si *SitemapIndex) validate() SitemapIndex {
 			defer wg.Done()
 			defer func() { <-sem }() // Release the semaphore slot
 
-			results[i] = si.Sitemap[i].validate(client)
+			results[i] = si.Sitemap[i].validate(checkClient)
 		}(i)
 	}
 	wg.Wait()
@@ -97,15 +93,12 @@ func (si *SitemapIndex) validate() SitemapIndex {
 func (s *Sitemap) validate(client *http.Client) SitemapValidation {
 	result := SitemapValidation{Sitemap: *s}
 
-	resp, err := client.Get(s.Loc)
+	status, err := checkURL(client, s.Loc)
+	if err == nil && status != http.StatusOK {
+		err = fmt.Errorf("status %d", status)
+	}
 	if err != nil {
 		result.Err = err
-		return result
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		result.Err = fmt.Errorf("status %d", resp.StatusCode)
 		return result
 	}
 
@@ -114,34 +107,32 @@ func (s *Sitemap) validate(client *http.Client) SitemapValidation {
 }
 
 func (si *SitemapIndex) saveToFile(filename string) error {
-	m, err := xml.Marshal((*si))
+	m, err := xml.MarshalIndent(si, "", "  ")
 	if err != nil {
 		return err
 	}
-
-	file, err := os.OpenFile(filename, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0777)
-	file.Write([]byte(xml.Header))
-	file.Write(m)
-	file.Close()
-	return err
+	data := append([]byte(xml.Header), m...)
+	data = append(data, '\n')
+	return writeFileAtomic(filename, data)
 }
 
-func batchProcess(uri string) error {
+func batchProcess(uri string) (Stats, error) {
 	rawXMLData, err := fetchXML(uri)
 	if err != nil {
-		return err
+		return Stats{}, err
 	}
 
 	sitemapIndex, err := newSitemapIndexFromXML(rawXMLData)
 	if err != nil {
-		return fmt.Errorf("%s is not a sitemap index: %v", uri, err)
+		return Stats{}, fmt.Errorf("%s is not a sitemap index: %v", uri, err)
 	}
 	return sitemapIndexValidate(sitemapIndex)
 }
 
-func sitemapIndexValidate(sitemapIndex SitemapIndex) error {
+func sitemapIndexValidate(sitemapIndex SitemapIndex) (Stats, error) {
 	newSitemapIndex := sitemapIndex.validate()
 	processed := SitemapIndex{XMLNs: newSitemapIndex.XMLNs}
+	var total Stats
 
 	for _, sitemap := range newSitemapIndex.Sitemap {
 		filename, err := sitemap.findFileName()
@@ -163,7 +154,9 @@ func sitemapIndexValidate(sitemapIndex SitemapIndex) error {
 		if Verbose {
 			fmt.Printf("Filename is %s\n", filename)
 		}
-		if err := singleProcess(sitemap.Loc, filename); err != nil {
+		stats, err := singleProcess(sitemap.Loc, filename)
+		total.add(stats)
+		if err != nil {
 			fmt.Printf("Dropping %s: %s\n", sitemap.Loc, err)
 		} else {
 			processed.Sitemap = append(processed.Sitemap, sitemap)
@@ -171,7 +164,10 @@ func sitemapIndexValidate(sitemapIndex SitemapIndex) error {
 		time.Sleep(time.Second * 2)
 	}
 
-	return processed.saveToFile(OutputFileName)
+	if len(processed.Sitemap) == 0 {
+		return total, fmt.Errorf("no live sitemaps in the index; %s was not written", OutputFileName)
+	}
+	return total, processed.saveToFile(OutputFileName)
 }
 
 func newSitemapIndexFromXML(rawXMLData []byte) (SitemapIndex, error) {
