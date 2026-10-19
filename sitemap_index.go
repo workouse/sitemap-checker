@@ -54,10 +54,6 @@ func (s Sitemap) findFileName() (string, error) {
 }
 
 func (si *SitemapIndex) validate() SitemapIndex {
-	client := &http.Client{
-		Timeout: 10 * time.Second,
-	}
-
 	results := make([]SitemapValidation, len(si.Sitemap))
 
 	// Limit the number of concurrent requests
@@ -73,7 +69,7 @@ func (si *SitemapIndex) validate() SitemapIndex {
 			defer wg.Done()
 			defer func() { <-sem }() // Release the semaphore slot
 
-			results[i] = si.Sitemap[i].validate(client)
+			results[i] = si.Sitemap[i].validate(checkClient)
 		}(i)
 	}
 	wg.Wait()
@@ -97,15 +93,12 @@ func (si *SitemapIndex) validate() SitemapIndex {
 func (s *Sitemap) validate(client *http.Client) SitemapValidation {
 	result := SitemapValidation{Sitemap: *s}
 
-	resp, err := client.Get(s.Loc)
+	status, err := checkURL(client, s.Loc)
+	if err == nil && status != http.StatusOK {
+		err = fmt.Errorf("status %d", status)
+	}
 	if err != nil {
 		result.Err = err
-		return result
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		result.Err = fmt.Errorf("status %d", resp.StatusCode)
 		return result
 	}
 
@@ -114,67 +107,73 @@ func (s *Sitemap) validate(client *http.Client) SitemapValidation {
 }
 
 func (si *SitemapIndex) saveToFile(filename string) error {
-	m, err := xml.Marshal((*si))
+	m, err := xml.MarshalIndent(si, "", "  ")
 	if err != nil {
 		return err
 	}
-
-	file, err := os.OpenFile(filename, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0777)
-	file.Write([]byte(xml.Header))
-	file.Write(m)
-	file.Close()
-	return err
+	data := append([]byte(xml.Header), m...)
+	data = append(data, '\n')
+	return writeFileAtomic(filename, data)
 }
 
-func batchProcess(uri string) {
-	resp, err := http.Get(uri)
+func batchProcess(uri string) (Stats, error) {
+	rawXMLData, err := fetchXML(uri)
 	if err != nil {
-		fmt.Printf("Url cannot fetched: %s\n", uri)
-		fmt.Println(err)
-		os.Exit(1)
+		return Stats{}, err
 	}
 
-	rawXMLData := readXMLFromResponse(resp)
-
-	sitemapIndex := newSitemapIndexFromXML(rawXMLData)
-	sitemapIndexValidate(sitemapIndex)
+	sitemapIndex, err := newSitemapIndexFromXML(rawXMLData)
+	if err != nil {
+		return Stats{}, fmt.Errorf("%s is not a sitemap index: %v", uri, err)
+	}
+	return sitemapIndexValidate(sitemapIndex)
 }
 
-func sitemapIndexValidate(sitemapIndex SitemapIndex) {
+func sitemapIndexValidate(sitemapIndex SitemapIndex) (Stats, error) {
 	newSitemapIndex := sitemapIndex.validate()
+	processed := SitemapIndex{XMLNs: newSitemapIndex.XMLNs}
+	var total Stats
 
 	for _, sitemap := range newSitemapIndex.Sitemap {
 		filename, err := sitemap.findFileName()
 		if err != nil {
 			fmt.Printf("Skipping %s: %s\n", sitemap.Loc, err)
+			processed.Sitemap = append(processed.Sitemap, sitemap)
 			continue
 		}
 		if filepath.Clean(filename) == filepath.Clean(OutputFileName) {
 			fmt.Printf("Skipping %s: it would overwrite the output file %s\n", sitemap.Loc, OutputFileName)
+			processed.Sitemap = append(processed.Sitemap, sitemap)
 			continue
 		}
 		if err := os.MkdirAll(filepath.Dir(filename), 0755); err != nil {
 			fmt.Printf("Skipping %s: %s\n", sitemap.Loc, err)
+			processed.Sitemap = append(processed.Sitemap, sitemap)
 			continue
 		}
 		if Verbose {
 			fmt.Printf("Filename is %s\n", filename)
 		}
-		singleProcess(sitemap.Loc, filename)
+		stats, err := singleProcess(sitemap.Loc, filename)
+		total.add(stats)
+		if err != nil {
+			fmt.Printf("Dropping %s: %s\n", sitemap.Loc, err)
+		} else {
+			processed.Sitemap = append(processed.Sitemap, sitemap)
+		}
 		time.Sleep(time.Second * 2)
 	}
 
-	newSitemapIndex.saveToFile(OutputFileName)
-
+	if len(processed.Sitemap) == 0 {
+		return total, fmt.Errorf("no live sitemaps in the index; %s was not written", OutputFileName)
+	}
+	return total, processed.saveToFile(OutputFileName)
 }
 
-func newSitemapIndexFromXML(rawXMLData []byte) SitemapIndex {
+func newSitemapIndexFromXML(rawXMLData []byte) (SitemapIndex, error) {
 	sm := SitemapIndex{}
-	err := xml.Unmarshal(rawXMLData, &sm)
-
-	if err != nil {
-		fmt.Printf("Sitemap index cannot parsed. Because: %s", err)
-		return SitemapIndex{}
+	if err := xml.Unmarshal(rawXMLData, &sm); err != nil {
+		return SitemapIndex{}, err
 	}
-	return sm
+	return sm, nil
 }

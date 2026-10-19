@@ -51,6 +51,8 @@ func TestSitemapIndexValidate(t *testing.T) {
 	}))
 	defer srv.Close()
 
+	defer withSettings(0, false)()
+
 	// A closed server gives a connection error instead of an HTTP status.
 	gone := httptest.NewServer(http.NotFoundHandler())
 	goneURL := gone.URL
